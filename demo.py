@@ -9,7 +9,6 @@ import glob
 import numpy as np
 import natsort
 import torch
-
 from src.utils import data_utils
 from src.utils import vis_utils
 from src.utils.metric_utils import ransac_PnP
@@ -49,6 +48,16 @@ def get_default_paths(cfg, data_root, data_dir, sfm_model_dir):
     intrin_full_dir = osp.join(data_dir, 'intrin_full')
 
     bbox3d_path = osp.join(data_root, 'box3d_corners.txt')
+    
+    pred_pose_dir = osp.join(data_dir, 'pred_poses')
+    if osp.exists(pred_pose_dir):
+        os.system(f"rm -rf {pred_pose_dir}")
+    os.makedirs(pred_pose_dir, exist_ok=True)
+
+    obj_name= os.path.basename(os.path.normpath(data_root))
+
+    gt_dir=osp.join(data_root, obj_name+"-GT/")
+
     paths = {
         "data_root": data_root,
         "data_dir": data_dir,
@@ -61,6 +70,8 @@ def get_default_paths(cfg, data_root, data_dir, sfm_model_dir):
         "vis_box_dir": vis_box_dir,
         "det_box_vis_video_path": det_box_vis_video_path,
         "demo_video_path": demo_video_path,
+        'pred_pose_dir': pred_pose_dir,
+        'gt_dir_path':gt_dir
     }
     return img_lists, paths
 
@@ -95,10 +106,23 @@ def inference_core(cfg, data_root, seq_dir, sfm_model_dir):
 
     bbox3d = np.loadtxt(paths["bbox3d_path"])
     pred_poses = {}  # {id:[pred_pose, inliers]}
+
+  
+    #collect gt_poses
+    path_gt=paths['gt_dir_path']+"poses/"
+    gt_poses={}
+    #gt_poses
+    for filename in glob.glob(os.path.join(path_gt,"*.txt")):
+        with open(filename,'r') as f:
+            tran_matrix=np.loadtxt(f,dtype=float)
+            id=int(os.path.splitext(os.path.basename(filename))[0])
+            gt_poses[id]=tran_matrix
+   
     for id in tqdm(range(len(dataset))):
         data = dataset[id]
         query_image = data['query_image']
         query_image_path = data['query_image_path']
+        
 
         # Detect object:
         if id == 0:
@@ -129,10 +153,15 @@ def inference_core(cfg, data_root, seq_dir, sfm_model_dir):
             match_2D_3D_model(data)
         mkpts_3d = data["mkpts_3d_db"].cpu().numpy() # N*3
         mkpts_query = data["mkpts_query_f"].cpu().numpy() # N*2
-        pose_pred, _, inliers, _ = ransac_PnP(K_crop, mkpts_query, mkpts_3d, scale=1000, pnp_reprojection_error=7, img_hw=[512,512], use_pycolmap_ransac=True)
-
+        pose_pred, pose_pred_homo, inliers, _ = ransac_PnP(K_crop, mkpts_query, mkpts_3d, scale=1000, pnp_reprojection_error=7, img_hw=[512,512], use_pycolmap_ransac=True)
+        
+        #save predicted pose for each frame
+        np.savetxt(osp.join(paths['pred_pose_dir'], '{}.txt'.format(id)), pose_pred_homo)
+        
+        
         pred_poses[id] = [pose_pred, inliers]
 
+       
         # Visualize:
         vis_utils.save_demo_image(
             pose_pred,
@@ -140,9 +169,19 @@ def inference_core(cfg, data_root, seq_dir, sfm_model_dir):
             image_path=query_image_path,
             box3d=bbox3d,
             draw_box=len(inliers) > 20,
-            save_path=osp.join(paths["vis_box_dir"], f"{id}.jpg"),
+            save_path=osp.join(paths["vis_box_dir"], f"{id}.jpg")
         )
-    
+        
+        #Visualize GT:
+        """
+        img_path=paths["vis_box_dir"]+"/"+f"{id}.jpg"
+        vis_utils.save_GT_image(gt_poses[id],
+            K,
+            image_path=img_path,
+            box3d=bbox3d,
+            save_path=osp.join(paths["vis_box_dir"], f"{id}.jpg")
+        )
+        """
     # Output video to visualize estimated poses:
     logger.info(f"Generate demo video begin...")
     vis_utils.make_video(paths["vis_box_dir"], paths["demo_video_path"])
@@ -164,6 +203,10 @@ def inference(cfg):
             seq_dir = osp.join(data_root, seq_name)
             logger.info(f"Eval {seq_dir}")
             inference_core(cfg, data_root, seq_dir, sfm_model_dir)
+
+
+
+
 
 @hydra.main(config_path="configs/", config_name="config.yaml")
 def main(cfg: DictConfig):
